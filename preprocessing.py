@@ -18,8 +18,10 @@ Example Classes (EC).
 
 import json
 import re
+import os
+import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 
 import psycopg2
 
@@ -565,7 +567,632 @@ def _mark_index_nested_loop(join: PlanNode) -> None:
 # =============================================================================
 # AI part (Member 2)
 # =============================================================================
-# To be added: ask the AI agent for its plan, validate the JSON, normalise
-# the operator names to PostgreSQL's (e.g. "Full Table Scan" -> "Seq Scan"),
-# and return a PlanNode tree. describe_schema(get_schema(conn)) gives the
-# schema, keys and indexes as text for the prompt.
+# Asks an AI agent (Google Gemini) for the query plan it predicts and turns the
+# answer into the same PlanNode tree the PostgreSQL part produces, so
+# comparison.py can compare the two trees directly.
+#
+# Main functions:
+#
+#   build_ai_prompt     schema (from describe_schema) + query -> prompt
+#   ask_ai              calls Gemini; retries on rate limits
+#   extract_plan_json   gets the JSON out of the answer
+#   normalize_operator  maps AI operator names to PostgreSQL's
+#                       (e.g. "Full Table Scan" -> "Seq Scan")
+#   parse_ai_plan       builds the PlanNode tree and normalises it
+#   get_ai_plan         runs all of the above; raises AIError on failure
+#   ai_prompt_preview   the exact prompt sent, e.g. for the GUI
+#
+# The API key is read from GEMINI_API_KEY or .env. Only operator names are
+# mapped, so nothing here is specific to TPC-H.
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+class AIError(Exception):
+    """Readable error for the GUI when the AI request or parsing fails."""
+
+
+# Set GEMINI_MODEL to override the default model.
+DEFAULT_AI_MODEL = "gemini-3.1-flash-lite"
+
+AI_OPERATORS = [
+    "Seq Scan",
+    "Index Scan",
+    "Index Only Scan",
+    "Bitmap Heap Scan",
+    "Bitmap Index Scan",
+    "BitmapAnd",
+    "BitmapOr",
+    "Nested Loop",
+    "Hash Join",
+    "Merge Join",
+    "Hash",
+    "Sort",
+    "Incremental Sort",
+    "Aggregate",
+    "HashAggregate",
+    "GroupAggregate",
+    "Unique",
+    "Limit",
+    "Materialize",
+    "Memoize",
+    "Subquery Scan",
+    "CTE Scan",
+    "Result",
+    "Append",
+    "SetOp",
+    "WindowAgg",
+]
+
+JOIN_OPERATORS = {"Nested Loop", "Hash Join", "Merge Join"}
+JOIN_TYPES = {"inner", "left", "right", "full", "semi", "anti"}
+
+# A small alias list, only for common alternate names.
+OPERATOR_ALIASES = {
+    "sequential scan": "Seq Scan",
+    "full table scan": "Seq Scan",
+    "table scan": "Seq Scan",
+    "index seek": "Index Scan",
+    "index lookup": "Index Scan",
+    "covering index scan": "Index Only Scan",
+    "hash match": "Hash Join",
+    "sort merge join": "Merge Join",
+    "nested loop join": "Nested Loop",
+    "hash aggregate": "HashAggregate",
+    "stream aggregate": "GroupAggregate",
+    "sort aggregate": "GroupAggregate",
+    "plain aggregate": "Aggregate",
+    "bitmap scan": "Bitmap Heap Scan",
+    "hash build": "Hash",
+    "hash table build": "Hash",
+    "seqscan": "Seq Scan",
+    "full scan": "Seq Scan",
+    "index range scan": "Index Scan",
+    "index unique scan": "Index Scan",
+    "btree index scan": "Index Scan",
+    "b tree index scan": "Index Scan",
+    "clustered index scan": "Index Scan",
+    "nested loops": "Nested Loop",
+    "loop join": "Nested Loop",
+    "hash aggregation": "HashAggregate",
+    "hash group by": "HashAggregate",
+    "hash distinct": "HashAggregate",
+    "group aggregate": "GroupAggregate",
+    "sorted aggregate": "GroupAggregate",
+    "scalar aggregate": "Aggregate",
+    "aggregation": "Aggregate",
+    "external sort": "Sort",
+    "external merge sort": "Sort",
+    "top n sort": "Sort",
+    "distinct": "Unique",
+    "top": "Limit",
+    "materialise": "Materialize",
+    "bitmap and": "BitmapAnd",
+    "bitmap or": "BitmapOr",
+}
+# Also accept PostgreSQL's own names in any capitalisation ("index only scan").
+OPERATOR_ALIASES.update({op.lower(): op for op in AI_OPERATORS})
+
+# Nodes PostgreSQL never has on their own, so they are removed or merged.
+PROJECTION_NAMES = {"projection", "project", "output"}
+SELECTION_NAMES = {"filter", "selection"}
+# -----------------------------------------------------------------------------
+# 1. Build the prompt
+# -----------------------------------------------------------------------------
+
+def build_ai_prompt(
+    schema_text: str,
+    query: str,
+    postgres_version: Optional[str] = None,
+) -> tuple[str, str]:
+    """Build the system prompt and user prompt sent to the AI."""
+
+    version_text = f" PostgreSQL {postgres_version}" if postgres_version else ""
+
+    system_prompt = f"""
+You are predicting a physical query execution plan (QEP) for PostgreSQL{version_text}.
+Given the database schema and SQL query, predict a plausible plan PostgreSQL
+could choose. This is a prediction, not a guaranteed reproduction of its optimizer.
+
+Return exactly one JSON object, with no markdown or explanation outside JSON.
+
+The JSON must have this format:
+{{
+  "plan": {{
+    "operator": "one allowed operator",
+    "table": "real table name or null",
+    "index": "real index name or null",
+    "join_type": "Inner, Left, Right, Full, Semi, Anti, or null",
+    "join_condition": "SQL condition or null",
+    "filter": "SQL filter condition or null",
+    "estimated_rows":  integer,
+    "reason": "one short reason",
+    "children": []
+  }},
+  "summary": "brief summary of the main plan choices"
+}}
+
+Allowed operators:
+{", ".join(AI_OPERATORS)}
+
+Rules:
+- Use only table and index names provided in the schema.
+- Use real table names, not aliases, in the table field.
+- Put the outer/left input first and the inner/right input second.
+- For a Hash Join, its second child must be a Hash node with one child.
+- For a Bitmap Heap Scan, include a Bitmap Index Scan child.
+- Include join conditions on join nodes.
+- Put selection conditions in filter.
+- Use Aggregate for aggregation without GROUP BY.
+- Use HashAggregate or GroupAggregate for aggregation with GROUP BY.
+- estimated_rows must be a non-negative integer.
+- children must always be a JSON array.
+- Do not use Gather or Gather Merge.
+- Do not invent schema objects.
+""".strip()
+
+    user_prompt = f"""
+Database schema, keys, indexes, and table statistics:
+{schema_text}
+
+SQL query:
+{query.strip().rstrip(";")}
+
+Return the JSON plan.
+""".strip()
+
+    return system_prompt, user_prompt
+
+
+# -----------------------------------------------------------------------------
+# 2. Ask Gemini
+# -----------------------------------------------------------------------------
+
+def ask_ai(
+    system_prompt: str,
+    user_prompt: str,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+    timeout_s: int = 120,
+) -> str:
+    """Call Gemini and return its text response."""
+ 
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise AIError(
+            "Gemini package is missing. Install it with: pip install google-genai"
+        ) from exc
+ 
+    key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not key:
+        raise AIError(
+            "No Gemini API key found. Set the GEMINI_API_KEY environment variable."
+        )
+ 
+    model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_AI_MODEL
+ 
+    client = genai.Client(
+        api_key=key,
+        http_options=types.HttpOptions(timeout=timeout_s * 1000),
+    )
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        temperature=0,
+        response_mime_type="application/json",
+    )
+ 
+    # Free-tier keys have a per-minute limit: on "too many requests" (429) or
+    # "server busy" (500/503), wait 10s, 30s, 60s and try again.
+    for wait in (10, 30, 60, None):
+        try:
+            response = client.models.generate_content(
+                model=model, contents=user_prompt, config=config)
+            break
+        except Exception as exc:
+            if getattr(exc, "code", None) in (429, 500, 503) and wait is not None:
+                time.sleep(wait)
+                continue
+            raise AIError(f"Could not get a response from Gemini: {exc}") from exc
+ 
+    answer = getattr(response, "text", None)
+    if not answer or not answer.strip():
+        raise AIError("Gemini returned an empty response.")
+ 
+    return answer
+
+
+# -----------------------------------------------------------------------------
+# 3. Extract and validate the JSON response
+# -----------------------------------------------------------------------------
+
+def extract_plan_json(answer: str) -> Dict[str, Any]:
+    """Parse JSON from Gemini's response, including optional code fences."""
+
+    if not answer or not answer.strip():
+        raise ValueError("The AI response was empty.")
+
+    cleaned = re.sub(r"```(?:json)?", "", answer, flags=re.IGNORECASE).strip()
+    cleaned = cleaned.replace("```", "").strip()
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Fallback: extract the first JSON object from surrounding text.
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("The response did not contain a JSON object.")
+        try:
+            data = json.loads(cleaned[start:end + 1])
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"The JSON response is invalid: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError("The JSON response must be an object.")
+
+    plan = data.get("plan")
+    if plan is None and "operator" in data:
+        plan = data
+
+    if not isinstance(plan, dict):
+        raise ValueError('The JSON response must contain a "plan" object.')
+
+    return {"plan": plan, "summary": data.get("summary")}
+
+
+# -----------------------------------------------------------------------------
+# 4. Convert AI JSON into the shared PlanNode tree
+# -----------------------------------------------------------------------------
+
+def normalize_operator(raw_operator: str):
+    """Return (postgres_name, join_type or None, recognised)."""
+    name = raw_operator.strip()
+    if name in AI_OPERATORS:
+        return name, None, True
+
+    lowered = name.lower()
+    if "hash" in lowered and "build" in lowered:          # "Hash (build phase)"
+        return "Hash", None, True
+
+    key = re.sub(r"\([^)]*\)", " ", lowered)              # drop "(...)"
+    key = re.sub(r"[-_]", " ", key)                        # "sort-merge" -> "sort merge"
+    key = re.sub(r"\s+", " ", key).strip()
+    if key in OPERATOR_ALIASES:
+        return OPERATOR_ALIASES[key], None, True
+
+    join_type = next((w.title() for w in key.split() if w in JOIN_TYPES), None)
+    if "hash" in key and "join" in key:
+        return "Hash Join", join_type, True
+    if "merge" in key and "join" in key:
+        return "Merge Join", join_type, True
+    if "nested loop" in key:
+        return "Nested Loop", join_type, True
+
+    return name, None, False
+
+def _clean_optional_text(value: Any) -> Optional[str]:
+    """Convert null-like values to None and other values to clean strings."""
+
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if text.lower() in {"", "null", "none"}:
+        return None
+
+    return text
+
+def _clean_condition_text(value: Any) -> Optional[str]:
+    """Remove casts (Member 1's clean_condition) and wrap in parentheses,
+    so conditions look the same as in the PostgreSQL tree."""
+    text = _clean_optional_text(value)
+    if text is None:
+        return None
+    text = clean_condition(text)
+    depth = 0
+    for i, ch in enumerate(text):
+        depth += (ch == "(") - (ch == ")")
+        if depth == 0 and i < len(text) - 1:      # "(a) AND (b)" or "a > 5"
+            return f"({text})"
+    return text if text.startswith("(") else f"({text})"
+
+
+def _query_aliases(query: str, table_names) -> Dict[str, str]:
+    """Aliases the query gives its tables, e.g. {"o": "orders"}."""
+    tables = {str(t).lower(): str(t) for t in table_names}
+    skip = {"where", "join", "inner", "left", "right", "full", "cross", "natural",
+            "on", "using", "group", "order", "limit", "having", "as"}
+    aliases = {}
+    pattern = r"(?:\bfrom|\bjoin|,)\s+(\w+)\s+(?:as\s+)?(\w+)"
+    for table, alias in re.findall(pattern, query, flags=re.IGNORECASE):
+        if table.lower() in tables and alias.lower() not in skip:
+            aliases[alias.lower()] = tables[table.lower()]
+    return aliases
+
+
+def _postgres_version(conn) -> Optional[str]:
+    """e.g. 160015 -> '16.15'."""
+    try:
+        v = conn.server_version
+        return f"{v // 10000}.{v % 100}"
+    except Exception:
+        return None
+    
+def parse_ai_plan(
+    data: Dict[str, Any],
+    schema_info: Dict[str, Any],
+    query: str = "",
+) -> PlanNode:
+    """Validate the plan's basic structure and convert it to PlanNode."""
+
+    root_json = data.get("plan", data)
+    if not isinstance(root_json, dict):
+        raise ValueError("The plan root must be a JSON object.")
+
+    # Build sets of real tables and indexes from Member 1's schema output.
+    tables = {str(table).lower(): str(table) for table in schema_info}
+    indexes: Dict[str, tuple[str, str]] = {}
+
+    for table_name, table_info in schema_info.items():
+        for index_info in table_info.get("indexes", []):
+            index_name = index_info.get("name")
+            if index_name:
+                indexes[str(index_name).lower()] = (str(index_name), str(table_name))
+
+    aliases = _query_aliases(query, schema_info) if query else {}
+    node_count = 0
+
+    def convert(node_data: Any, depth: int = 0) -> PlanNode:
+        nonlocal node_count
+        node_count += 1
+
+        if not isinstance(node_data, dict):
+            raise ValueError("Each plan node must be a JSON object.")
+        if depth > 40 or node_count > 500:
+            raise ValueError("The AI plan is too large or deeply nested.")
+
+        raw_operator = node_data.get("operator")
+        if not isinstance(raw_operator, str) or not raw_operator.strip():
+            raise ValueError('Each node must have a non-empty "operator".')
+
+        children_data = node_data.get("children") or []
+        if not isinstance(children_data, list):
+            raise ValueError('"children" must be a JSON array.')
+
+        # Drop Projection nodes; merge Filter nodes into the node below.
+        op_key = raw_operator.strip().lower()
+        if op_key in PROJECTION_NAMES and len(children_data) == 1:
+            return convert(children_data[0], depth + 1)
+        if op_key in SELECTION_NAMES and len(children_data) == 1:
+            child = convert(children_data[0], depth + 1)
+            condition = _clean_condition_text(node_data.get("filter"))
+            if condition:
+                child.filter = f"{child.filter} AND {condition}" if child.filter else condition
+            return child
+
+        operator, name_join_type, known = normalize_operator(raw_operator)
+        table = _clean_optional_text(node_data.get("table"))
+        index = _clean_optional_text(node_data.get("index"))
+        filter_text = _clean_condition_text(node_data.get("filter"))
+        join_condition = _clean_condition_text(node_data.get("join_condition"))
+
+        details: Dict[str, Any] = {"ai_operator": raw_operator}
+        if not known:
+            details["unknown_operator"] = True
+
+        # Check table names against the database schema (aliases allowed).
+        if table:
+            name = table.split(".")[-1].lower()            # public.orders -> orders
+            if name in tables:
+                table = tables[name]
+            elif name in aliases:
+                details["alias"] = table
+                table = aliases[name]
+            else:
+                details["unknown_table"] = True
+
+        # Check index names against the schema.
+        if index:
+            index_info = indexes.get(index.lower())
+            if index_info:
+                real_index, index_table = index_info
+                index = real_index
+
+                # If the AI omitted the table on an index scan, infer it.
+                if table is None and operator in {
+                    "Index Scan", "Index Only Scan", "Bitmap Index Scan"
+                }:
+                    table = index_table
+                elif table and table.lower() != index_table.lower():
+                    details["index_wrong_table"] = True
+            else:
+                details["unknown_index"] = True
+
+        if operator in JOIN_OPERATORS:
+            join_type = (_clean_optional_text(node_data.get("join_type")) or name_join_type or "Inner")
+            join_type = join_type.lower().replace("outer", "").strip().title()
+            if join_type.lower() not in JOIN_TYPES:
+                join_type = "Inner"
+            details["join_type"] = join_type
+
+        reason = _clean_optional_text(node_data.get("reason"))
+        if reason:
+            details["ai_reason"] = reason
+
+        estimated_rows = node_data.get("estimated_rows")
+        if isinstance(estimated_rows, (int, float)) and not isinstance(estimated_rows, bool):
+            details["estimated_rows"] = max(0, int(estimated_rows))
+
+        children = [convert(child, depth + 1) for child in children_data]
+
+        # PostgreSQL represents the build input of a Hash Join with a Hash node.
+        if operator == "Hash Join" and len(children) == 2:
+            if children[1].operator != "Hash":
+                children[1] = PlanNode(
+                    operator="Hash",
+                    children=[children[1]],
+                    details={"added_by_normalization": True},
+                )
+
+        # PostgreSQL's Bitmap Heap Scan usually has a Bitmap Index Scan child.
+        if operator == "Bitmap Heap Scan" and not children and index:
+            children = [
+                PlanNode(
+                    operator="Bitmap Index Scan",
+                    table=table,
+                    index=index,
+                    filter=filter_text,
+                    details={"added_by_normalization": True},
+                )
+            ]
+            index = None
+
+        return PlanNode(
+            operator=operator,
+            table=table,
+            index=index,
+            join_condition=join_condition,
+            filter=filter_text,
+            children=children,
+            details=details,
+        )
+
+    root = convert(root_json)
+
+    summary = _clean_optional_text(data.get("summary"))
+    if summary:
+        root.details["ai_summary"] = summary
+
+    return root
+
+
+# -----------------------------------------------------------------------------
+# 5. Main function
+# -----------------------------------------------------------------------------
+
+_AI_CACHE: Dict[tuple, str] = {}
+
+
+def get_ai_plan(
+    conn,
+    query: str,
+    schema_info: Optional[Dict[str, Any]] = None,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+    llm: Optional[Callable[[str, str], str]] = None,
+    retries: int = 1,
+    use_cache: bool = True,
+) -> PlanNode:
+    """
+    Get the AI-predicted QEP as a PlanNode tree.
+ 
+    conn:
+        Member 1's PostgreSQL connection. May be None if schema_info is supplied.
+    schema_info:
+        Output of get_schema(conn). If omitted, it is obtained from conn.
+    llm:
+        Optional custom callable(system_prompt, user_prompt) -> response text.
+    retries:
+        Number of retries after an invalid AI response. Default is one retry.
+    """
+ 
+    query = (query or "").strip().rstrip(";").strip()
+    if not query:
+        raise AIError("The SQL query is empty.")
+ 
+    if schema_info is None:
+        if conn is None:
+            raise AIError("A database connection or schema_info must be provided.")
+        schema_info = get_schema(conn)
+ 
+    if not schema_info:
+        raise AIError("No tables were found in the selected schema.")
+ 
+    system_prompt, user_prompt = build_ai_prompt(
+        describe_schema(schema_info),
+        query,
+        _postgres_version(conn),
+    )
+ 
+    selected_model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_AI_MODEL
+ 
+    def call_ai(system: str, user: str) -> str:
+        if llm is not None:
+            return llm(system, user)
+        return ask_ai(
+            system,
+            user,
+            model=selected_model,
+            api_key=api_key,
+        )
+ 
+    cache_key = (selected_model, system_prompt, user_prompt)
+    response_text = _AI_CACHE.get(cache_key) if use_cache else None
+ 
+    attempts = 0
+    last_error: Optional[Exception] = None
+ 
+    while attempts <= retries:
+        attempts += 1
+ 
+        try:
+            if response_text is None:
+                response_text = call_ai(system_prompt, user_prompt)
+ 
+            parsed_json = extract_plan_json(response_text)
+            plan = parse_ai_plan(parsed_json, schema_info, query)
+ 
+            plan.details["ai_model"] = selected_model if llm is None else "custom"
+            plan.details["ai_attempts"] = attempts
+            plan.details["ai_raw_response"] = response_text
+ 
+            if use_cache:
+                _AI_CACHE[cache_key] = response_text
+ 
+            return plan
+ 
+        except (ValueError, TypeError, KeyError) as exc:
+            last_error = exc
+            response_text = None
+ 
+            if attempts <= retries:
+                user_prompt = (
+                    f"{user_prompt}\n\n"
+                    f"Your previous response could not be parsed: {exc}\n"
+                    "Please return a corrected JSON plan only."
+                )
+ 
+    raise AIError(
+        f"The AI did not return a usable plan after {attempts} attempt(s): "
+        f"{last_error}"
+    )
+ 
+ 
+def ai_prompt_preview(
+    conn,
+    query: str,
+    schema_info: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Return the prompt text, useful for previewing it in the GUI."""
+ 
+    if schema_info is None:
+        if conn is None:
+            raise AIError("A database connection or schema_info must be provided.")
+        schema_info = get_schema(conn)
+ 
+    system_prompt, user_prompt = build_ai_prompt(
+        describe_schema(schema_info),
+        query,
+    )
+ 
+    return (
+        "=== System prompt ===\n"
+        f"{system_prompt}\n\n"
+        "=== User prompt ===\n"
+        f"{user_prompt}"
+    )
