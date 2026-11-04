@@ -54,12 +54,15 @@ def main():
             print("\nAI error:", e)
             return
 
-        print("\n========== AI PREDICTED PLAN ==========")
+        print("\n========== QUERY PLANS ==========")
 
-        print("--- PostgreSQL")
+        print("--- PostgreSQL (actual plan)")
         print(pp.get_postgres_plan(conn, query, parallel=False).pretty())
-        print("--- AI")
+        print("--- AI (Gemini predicted plan)")
         print(plan.pretty())
+
+        print("\nModel:", plan.details["ai_model"])
+        print("Summary:", plan.details.get("ai_summary", "-"))
 
         print("\n========== TEST COMPLETED ==========")
 

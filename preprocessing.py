@@ -596,7 +596,7 @@ class AIError(Exception):
 
 
 # Set GEMINI_MODEL to override the default model.
-DEFAULT_AI_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_AI_MODEL = "gemini-3.6-flash"
 
 AI_OPERATORS = [
     "Seq Scan",
