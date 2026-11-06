@@ -86,8 +86,15 @@ def main():
         print("--- AI (Gemini predicted plan)")
         print(plan.pretty())
 
+        print("\n--- Gemini raw JSON response")
+        raw = plan.details["ai_raw_response"]
+        try:
+            print(json.dumps(json.loads(raw), indent=2))   # neatly indented
+        except ValueError:
+            print(raw)                                     # print as-is if it isn't plain JSON
+
         print("\nModel:", plan.details["ai_model"])
-        print("Summary:", plan.details.get("ai_summary", "-"))
+        # print("Summary:", plan.details.get("ai_summary", "-"))
 
         print("\n========== TEST COMPLETED ==========")
 
