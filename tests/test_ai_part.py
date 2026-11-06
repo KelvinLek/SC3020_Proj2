@@ -33,38 +33,63 @@ def main():
 
         print("\nDatabase schema retrieved successfully.")
 
-        # Sample SQL query
-        query = """
-        SELECT c_name, o_orderdate
-        FROM customer
-        JOIN orders ON c_custkey = o_custkey
-        WHERE o_totalprice > 100000
-        LIMIT 10;
-        """
+        # Same 13 queries as the PostgreSQL test
+        from test_postgres_part import QUERIES
+        import time
 
-        print("\nSQL Query:")
-        print(query)
+        for name, query in QUERIES.items():
+            print(f"\n========== {name} ==========")
+            try:
+                plan = pp.get_ai_plan(conn, query, schema_info=schema_info)
+            except pp.AIError as e:
+                print("AI error:", e)
+                continue
 
-        # Generate AI predicted query plan
-        print("\nGenerating AI predicted query plan...")
+            print("--- PostgreSQL (actual plan)")
+            print(pp.get_postgres_plan(conn, query, parallel=False).pretty())
+            print("--- AI (Gemini predicted plan)")
+            print(plan.pretty())
 
-        try:
-            plan = pp.get_ai_plan(conn, query, schema_info=schema_info)
-        except pp.AIError as e:
-            print("\nAI error:", e)
-            return
-
-        print("\n========== QUERY PLANS ==========")
-
-        print("--- PostgreSQL (actual plan)")
-        print(pp.get_postgres_plan(conn, query, parallel=False).pretty())
-        print("--- AI (Gemini predicted plan)")
-        print(plan.pretty())
+            flags = [k for n in plan.walk() for k in n.details
+                     if k in ("unknown_operator", "unknown_table", "unknown_index", "index_wrong_table")]
+            print("Flags:", flags or "none")
+            time.sleep(5)          # stay under the free-tier rate limit
 
         print("\nModel:", plan.details["ai_model"])
-        print("Summary:", plan.details.get("ai_summary", "-"))
-
         print("\n========== TEST COMPLETED ==========")
+
+        # # Sample SQL query
+        # query = """
+        # SELECT c_name, o_orderdate
+        # FROM customer
+        # JOIN orders ON c_custkey = o_custkey
+        # WHERE o_totalprice > 100000
+        # LIMIT 10;
+        # """
+
+        # print("\nSQL Query:")
+        # print(query)
+
+        # # Generate AI predicted query plan
+        # print("\nGenerating AI predicted query plan...")
+
+        # try:
+        #     plan = pp.get_ai_plan(conn, query, schema_info=schema_info)
+        # except pp.AIError as e:
+        #     print("\nAI error:", e)
+        #     return
+
+        # print("\n========== QUERY PLANS ==========")
+
+        # print("--- PostgreSQL (actual plan)")
+        # print(pp.get_postgres_plan(conn, query, parallel=False).pretty())
+        # print("--- AI (Gemini predicted plan)")
+        # print(plan.pretty())
+
+        # print("\nModel:", plan.details["ai_model"])
+        # print("Summary:", plan.details.get("ai_summary", "-"))
+
+        # print("\n========== TEST COMPLETED ==========")
 
     finally:
         conn.close()
