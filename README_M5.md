@@ -6,9 +6,9 @@
 
 ## Zero-cost requirement
 
-The evaluation runner is limited to the Gemini API free tier. Before running it, verify in Google AI Studio that billing is disabled for the API key's project. The code cannot inspect the account's billing configuration; `--confirm-free-tier` is an operator confirmation, not an automatic check. Do not enable billing for this run. If free-tier quota is exhausted, failed requests are recorded and the runner does not switch to a paid model or retry the request.
+The evaluation runner is limited to the Gemini API free tier. Before running it, verify in Google AI Studio that billing is disabled for the API key's project. The code cannot inspect the account's billing configuration; `--confirm-free-tier` is an operator confirmation, not an automatic check. Do not enable billing for this run. The tested `gemini-3.6-flash` free-tier project reported a limit of 20 requests per day. The runner caps at 20, stops immediately on a quota response, records remaining queries as not run, and does not switch to a paid model or retry the request.
 
-The runner processes queries serially, permits at most 30 API request attempts per run and 30 per UTC day, and reserves each request before calling Gemini. `experiment-results/api_budget.json` tracks the daily total under a project-wide lock, so choosing another output directory cannot bypass the cap. A JSON checkpoint is updated before and after each query; an interrupted run retains completed results and marks any in-flight request. Failed query IDs are saved so they can be selected explicitly later.
+The runner processes queries serially, defaults to at most 20 API request attempts per run, and permits at most 20 per UTC day. It reserves each request before calling Gemini. `experiment-results/api_budget.json` tracks the daily total under a project-wide lock, so choosing another output directory cannot bypass the cap. A JSON checkpoint is updated before and after each query; an interrupted run retains completed results and marks any in-flight request. Failed query IDs are saved so they can be selected explicitly later. When fewer than 20 daily requests remain, pass `--max-queries` or `--query-ids` to fit the remaining budget.
 
 ## Run
 
@@ -35,7 +35,7 @@ Use `python project.py --help` for the evaluation options. Normal GUI startup re
 
 ## Outputs and interpretation
 
-Results are written under `experiment-results/`; the result artifacts are suitable for review and inclusion in the report. Only the local request ledger and lock are ignored by Git:
+Results are written under `experiment-results/`; these generated artifacts are available locally for review and inclusion in the report, but are ignored by Git to avoid committing partial or machine-specific runs. Add only the reviewed final artifacts to the report:
 
 - `evaluation_<UTC timestamp>.json`: run metadata, query outcomes, aggregate rate statistics, and category counts.
 - `evaluation_<UTC timestamp>.csv`: one row per query for analysis.

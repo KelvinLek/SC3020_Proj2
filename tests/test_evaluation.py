@@ -145,6 +145,31 @@ class EvaluationTests(unittest.TestCase):
             reservations = json.loads((budget_dir / 'api_budget.json').read_text())['reservations']
             self.assertEqual(reservations[0]['query_id'], 'Q01')
 
+    def test_quota_exhaustion_stops_batch_and_marks_remaining_queries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / 'results'
+            budget_dir = Path(directory) / 'shared-budget'
+            with mock.patch.object(project, 'BUDGET_DIR', budget_dir, create=True), \
+                 mock.patch.object(project.pp, 'connect', return_value=FakeConnection()), \
+                 mock.patch.object(project.pp, 'get_schema', return_value={'region': {}}), \
+                 mock.patch.object(project.pp, '_postgres_version', return_value='PostgreSQL test'), \
+                 mock.patch.object(project.pp, 'get_postgres_plan', return_value=object()), \
+                 mock.patch.object(project.pp, 'get_ai_plan',
+                                   side_effect=pp.AIError('429 RESOURCE_EXHAUSTED daily quota')) as get_ai_plan:
+                metadata = project.run_evaluation(
+                    {'user': 'test', 'password': '', 'host': 'localhost', 'port': 5432},
+                    'TPC-H', 'public', 'free-tier-test-key', 'test-model',
+                    Path(__file__).parents[1] / 'workload.json', output_dir,
+                    query_ids=['Q01', 'Q02', 'Q03'], max_queries=3, pause_seconds=0,
+                    scale_factor=0.1)
+
+            get_ai_plan.assert_called_once()
+            self.assertEqual(metadata['status'], 'quota_exhausted')
+            results_file = next(output_dir.glob('evaluation_*.json'))
+            results = json.loads(results_file.read_text())['results']
+            self.assertEqual([item['status'] for item in results],
+                             ['error', 'not_run', 'not_run'])
+
     def test_ask_ai_attempt_limit_disables_retry_amplification(self):
         class RateLimitError(Exception):
             code = 429

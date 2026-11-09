@@ -12,6 +12,9 @@ tpch_data/
 experiment-results/api_budget.json
 experiment-results/.api_budget.lock
 experiment-results/*.tmp
+experiment-results/evaluation_*.json
+experiment-results/evaluation_*.csv
+experiment-results/evaluation_*.png
 
 # Editor / tool files
 .vscode/

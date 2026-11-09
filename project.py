@@ -21,7 +21,7 @@ import comparison as cmp
 from psycopg2 import sql
 
 MAX_EXPERIMENT_QUERIES = 30
-MAX_DAILY_API_REQUESTS = 30
+MAX_DAILY_API_REQUESTS = 20
 EXPERIMENT_PAUSE_SECONDS = 5
 BUDGET_DIR = Path(__file__).with_name('experiment-results')
 
@@ -166,12 +166,18 @@ def _evaluation_summary(results):
     return {
         'successful_queries': len(successful),
         'failed_queries': sum(item['status'] == 'error' for item in results),
+        'not_run_queries': sum(item['status'] == 'not_run' for item in results),
         'mean_difference_rate': core_stats['mean'],
         'mean_strict_difference_rate': strict_stats['mean'],
         'core_difference_rate_stats': core_stats,
         'strict_difference_rate_stats': strict_stats,
         'category_totals': dict(sorted(category_totals.items())),
     }
+
+
+def _is_quota_exhausted(error):
+    message = str(error).upper()
+    return 'RESOURCE_EXHAUSTED' in message or 'QUOTA EXCEEDED' in message or '429' in message
 
 
 def _plot_results(results, output_path):
@@ -222,7 +228,7 @@ def _plot_results(results, output_path):
 
 
 def run_evaluation(settings, database, schema, api_key, model, workload_path,
-                   output_dir, query_ids=None, max_queries=MAX_EXPERIMENT_QUERIES,
+                   output_dir, query_ids=None, max_queries=MAX_DAILY_API_REQUESTS,
                    pause_seconds=EXPERIMENT_PAUSE_SECONDS, scale_factor=None):
     """Run a bounded, serial evaluation and save machine-readable results and charts."""
     if not 1 <= max_queries <= MAX_EXPERIMENT_QUERIES:
@@ -279,7 +285,7 @@ def run_evaluation(settings, database, schema, api_key, model, workload_path,
             'daily_api_requests_used': request_count,
             'concurrency': 1, 'queries_requested': len(queries),
             'parallel': False, 'cache_enabled': False,
-            'queries_succeeded': 0, 'queries_failed': 0,
+            'queries_succeeded': 0, 'queries_failed': 0, 'queries_not_run': 0,
             'status': 'running',
         }
 
@@ -288,6 +294,7 @@ def run_evaluation(settings, database, schema, api_key, model, workload_path,
             metadata['daily_api_requests_used'] = request_count
             metadata['queries_succeeded'] = sum(item['status'] == 'ok' for item in results)
             metadata['queries_failed'] = sum(item['status'] == 'error' for item in results)
+            metadata['queries_not_run'] = sum(item['status'] == 'not_run' for item in results)
             temporary_path = json_path.with_suffix('.tmp')
             temporary_path.write_text(json.dumps(
                 {'metadata': metadata, 'summary': _evaluation_summary(results),
@@ -318,6 +325,7 @@ def run_evaluation(settings, database, schema, api_key, model, workload_path,
                 }
                 results.append(item)
                 write_checkpoint()
+                quota_exhausted = False
                 try:
                     pg_tree = pp.get_postgres_plan(conn, query['sql'], parallel=False)
                     request_count += 1
@@ -341,14 +349,30 @@ def run_evaluation(settings, database, schema, api_key, model, workload_path,
                 except Exception as exc:
                     item['status'] = 'error'
                     item['error'] = f'{type(exc).__name__}: {exc}'
+                    quota_exhausted = _is_quota_exhausted(exc)
                 write_checkpoint()
                 print(f"{query['id']}: {item['status']}" +
                       (f" - {item['error']}" if 'error' in item else ''))
+                if quota_exhausted:
+                    metadata['status'] = 'quota_exhausted'
+                    metadata['stop_reason'] = 'Gemini free-tier request quota exhausted.'
+                    for remaining_query in queries[index + 1:]:
+                        results.append({
+                            'query_id': remaining_query['id'],
+                            'title': remaining_query['title'],
+                            'families': remaining_query.get('families', []),
+                            'sql': remaining_query['sql'], 'model': model,
+                            'status': 'not_run',
+                            'error': 'Not attempted after Gemini quota exhaustion.',
+                        })
+                    write_checkpoint()
+                    break
                 if index + 1 < len(queries) and pause_seconds > 0:
                     time.sleep(pause_seconds)
         finally:
             conn.close()
-        metadata['status'] = 'complete'
+        if metadata['status'] == 'running':
+            metadata['status'] = 'complete_with_errors' if metadata['queries_failed'] else 'complete'
         write_checkpoint()
     except KeyboardInterrupt:
         if 'write_checkpoint' in locals():
@@ -405,7 +429,7 @@ def main():
                         help='TPC-H data scale factor used to build the selected database')
     parser.add_argument('--workload', type=Path, default=Path(__file__).with_name('workload.json'))
     parser.add_argument('--output-dir', type=Path, default=Path(__file__).with_name('experiment-results'))
-    parser.add_argument('--max-queries', type=int, default=MAX_EXPERIMENT_QUERIES)
+    parser.add_argument('--max-queries', type=int, default=MAX_DAILY_API_REQUESTS)
     parser.add_argument('--query-ids', nargs='*')
     args = parser.parse_args()
 
