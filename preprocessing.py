@@ -757,8 +757,12 @@ def ask_ai(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
     timeout_s: int = 120,
+    max_attempts: int = 4,
 ) -> str:
     """Call Gemini and return its text response."""
+
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
  
     try:
         from google import genai
@@ -778,7 +782,10 @@ def ask_ai(
  
     client = genai.Client(
         api_key=key,
-        http_options=types.HttpOptions(timeout=timeout_s * 1000),
+        http_options=types.HttpOptions(
+            timeout=timeout_s * 1000,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
     )
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
@@ -788,14 +795,16 @@ def ask_ai(
  
     # Free-tier keys have a per-minute limit: on "too many requests" (429) or
     # "server busy" (500/503), wait 10s, 30s, 60s and try again.
-    for wait in (10, 30, 60, None):
+    retry_waits = (10, 30, 60)
+    for attempt in range(max_attempts):
         try:
             response = client.models.generate_content(
                 model=model, contents=user_prompt, config=config)
             break
         except Exception as exc:
-            if getattr(exc, "code", None) in (429, 500, 503) and wait is not None:
-                time.sleep(wait)
+            if (getattr(exc, "code", None) in (429, 500, 503)
+                    and attempt + 1 < max_attempts):
+                time.sleep(retry_waits[min(attempt, len(retry_waits) - 1)])
                 continue
             raise AIError(f"Could not get a response from Gemini: {exc}") from exc
  
@@ -1087,6 +1096,7 @@ def get_ai_plan(
     llm: Optional[Callable[[str, str], str]] = None,
     retries: int = 1,
     use_cache: bool = True,
+    max_request_attempts: int = 4,
 ) -> PlanNode:
     """
     Get the AI-predicted QEP as a PlanNode tree.
@@ -1099,6 +1109,9 @@ def get_ai_plan(
         Optional custom callable(system_prompt, user_prompt) -> response text.
     retries:
         Number of retries after an invalid AI response. Default is one retry.
+    max_request_attempts:
+        Maximum Gemini requests per response attempt. Default preserves the
+        existing transient-error retry behavior.
     """
  
     query = (query or "").strip().rstrip(";").strip()
@@ -1129,6 +1142,7 @@ def get_ai_plan(
             user,
             model=selected_model,
             api_key=api_key,
+            max_attempts=max_request_attempts,
         )
  
     cache_key = (selected_model, system_prompt, user_prompt)

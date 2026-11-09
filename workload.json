@@ -1,0 +1,185 @@
+{
+  "dataset": "TPC-H",
+  "queries": [
+    {
+      "id": "Q01",
+      "title": "Shipping mode revenue summary",
+      "families": ["filter", "aggregate", "grouping"],
+      "sql": "SELECT l_shipmode, l_returnflag, SUM(l_extendedprice * (1 - l_discount)) AS revenue FROM lineitem WHERE l_shipdate >= DATE '1995-01-01' AND l_shipdate < DATE '1996-01-01' GROUP BY l_shipmode, l_returnflag ORDER BY revenue DESC"
+    },
+    {
+      "id": "Q02",
+      "title": "High-balance customers with recent orders",
+      "families": ["filter", "join", "limit"],
+      "sql": "SELECT c.c_custkey, c.c_name, o.o_orderdate, o.o_totalprice FROM customer c JOIN orders o ON o.o_custkey = c.c_custkey WHERE c.c_acctbal > 5000 AND o.o_orderdate >= DATE '1996-01-01' ORDER BY o.o_totalprice DESC LIMIT 25"
+    },
+    {
+      "id": "Q03",
+      "title": "Order counts by sales region",
+      "families": ["three-way join", "aggregate", "grouping"],
+      "sql": "SELECT r.r_name, COUNT(DISTINCT c.c_custkey) AS customers, COUNT(o.o_orderkey) AS orders FROM region r JOIN nation n ON n.n_regionkey = r.r_regionkey JOIN customer c ON c.c_nationkey = n.n_nationkey LEFT JOIN orders o ON o.o_custkey = c.c_custkey GROUP BY r.r_name ORDER BY orders DESC"
+    },
+    {
+      "id": "Q04",
+      "title": "Part price and discount bands",
+      "families": ["range filter", "aggregate", "grouping"],
+      "sql": "SELECT p_brand, p_size, COUNT(*) AS part_count, AVG(p_retailprice) AS average_price FROM part WHERE p_retailprice BETWEEN 100 AND 500 AND p_size BETWEEN 10 AND 30 GROUP BY p_brand, p_size HAVING COUNT(*) > 1 ORDER BY average_price DESC"
+    },
+    {
+      "id": "Q05",
+      "title": "Supplier value by nation",
+      "families": ["three-way join", "aggregate", "grouping"],
+      "sql": "SELECT n.n_name, COUNT(DISTINCT s.s_suppkey) AS suppliers, SUM(ps.ps_availqty * ps.ps_supplycost) AS inventory_value FROM nation n JOIN supplier s ON s.s_nationkey = n.n_nationkey JOIN partsupp ps ON ps.ps_suppkey = s.s_suppkey GROUP BY n.n_name HAVING SUM(ps.ps_availqty) > 10000 ORDER BY inventory_value DESC"
+    },
+    {
+      "id": "Q06",
+      "title": "Lowest supplier cost per part",
+      "families": ["aggregate", "join", "subquery"],
+      "sql": "SELECT p.p_partkey, p.p_name, (SELECT MIN(ps.ps_supplycost) FROM partsupp ps WHERE ps.ps_partkey = p.p_partkey) AS lowest_cost FROM part p WHERE p.p_size IN (5, 15, 25) ORDER BY lowest_cost NULLS LAST LIMIT 40"
+    },
+    {
+      "id": "Q07",
+      "title": "Customers without orders",
+      "families": ["anti join", "outer join", "filter"],
+      "sql": "SELECT c.c_custkey, c.c_name FROM customer c LEFT JOIN orders o ON o.o_custkey = c.c_custkey WHERE o.o_orderkey IS NULL AND c.c_acctbal > 0 ORDER BY c.c_custkey LIMIT 100"
+    },
+    {
+      "id": "Q08",
+      "title": "Part supply coverage",
+      "families": ["join", "distinct", "aggregate"],
+      "sql": "SELECT p.p_type, COUNT(DISTINCT ps.ps_partkey) AS supplied_parts, COUNT(DISTINCT ps.ps_suppkey) AS suppliers FROM part p JOIN partsupp ps ON ps.ps_partkey = p.p_partkey WHERE p.p_type LIKE '%STEEL' GROUP BY p.p_type ORDER BY supplied_parts DESC"
+    },
+    {
+      "id": "Q09",
+      "title": "Annual line-item revenue by customer nation",
+      "families": ["four-way join", "date filter", "aggregate"],
+      "sql": "SELECT n.n_name, EXTRACT(YEAR FROM o.o_orderdate) AS order_year, SUM(l.l_extendedprice * (1 - l.l_discount)) AS revenue FROM nation n JOIN customer c ON c.c_nationkey = n.n_nationkey JOIN orders o ON o.o_custkey = c.c_custkey JOIN lineitem l ON l.l_orderkey = o.o_orderkey WHERE o.o_orderdate >= DATE '1994-01-01' AND o.o_orderdate < DATE '1998-01-01' GROUP BY n.n_name, EXTRACT(YEAR FROM o.o_orderdate) ORDER BY order_year, revenue DESC"
+    },
+    {
+      "id": "Q10",
+      "title": "Orders containing late receipts",
+      "families": ["correlated EXISTS", "join", "filter"],
+      "sql": "SELECT o.o_orderkey, o.o_orderdate, o.o_totalprice FROM orders o WHERE EXISTS (SELECT 1 FROM lineitem l WHERE l.l_orderkey = o.o_orderkey AND l.l_receiptdate > l.l_commitdate) ORDER BY o.o_orderdate DESC LIMIT 50"
+    },
+    {
+      "id": "Q11",
+      "title": "Parts with no regional supplier",
+      "families": ["correlated NOT EXISTS", "multiway join"],
+      "sql": "SELECT p.p_partkey, p.p_name FROM part p WHERE NOT EXISTS (SELECT 1 FROM partsupp ps JOIN supplier s ON s.s_suppkey = ps.ps_suppkey JOIN nation n ON n.n_nationkey = s.s_nationkey WHERE ps.ps_partkey = p.p_partkey AND n.n_name = 'CANADA') ORDER BY p.p_partkey LIMIT 100"
+    },
+    {
+      "id": "Q12",
+      "title": "Orders above average value",
+      "families": ["scalar subquery", "aggregate", "filter"],
+      "sql": "SELECT o_orderstatus, COUNT(*) AS order_count FROM orders WHERE o_totalprice > (SELECT AVG(o_totalprice) FROM orders) GROUP BY o_orderstatus ORDER BY order_count DESC"
+    },
+    {
+      "id": "Q13",
+      "title": "Customer order totals via CTE",
+      "families": ["CTE", "aggregate", "join"],
+      "sql": "WITH customer_totals AS (SELECT o_custkey, SUM(o_totalprice) AS total_value, COUNT(*) AS order_count FROM orders GROUP BY o_custkey) SELECT c.c_mktsegment, COUNT(*) AS customers, AVG(t.total_value) AS average_value FROM customer_totals t JOIN customer c ON c.c_custkey = t.o_custkey WHERE t.order_count >= 2 GROUP BY c.c_mktsegment ORDER BY average_value DESC"
+    },
+    {
+      "id": "Q14",
+      "title": "Open and closed line-item totals",
+      "families": ["UNION ALL", "aggregate", "filter"],
+      "sql": "SELECT status, SUM(quantity) AS total_quantity FROM (SELECT l_linestatus AS status, l_quantity AS quantity FROM lineitem WHERE l_shipdate >= DATE '1997-01-01' UNION ALL SELECT l_linestatus AS status, l_quantity AS quantity FROM lineitem WHERE l_shipdate < DATE '1993-01-01') AS selected_items GROUP BY status ORDER BY status"
+    },
+    {
+      "id": "Q15",
+      "title": "Self-join orders from the same customer",
+      "families": ["self join", "range condition", "limit"],
+      "sql": "SELECT older.o_custkey, older.o_orderkey AS earlier_order, newer.o_orderkey AS later_order FROM orders older JOIN orders newer ON newer.o_custkey = older.o_custkey AND newer.o_orderdate > older.o_orderdate WHERE older.o_orderdate >= DATE '1997-01-01' AND newer.o_totalprice > older.o_totalprice ORDER BY later_order LIMIT 100"
+    },
+    {
+      "id": "Q16",
+      "title": "Region-key inequality pairs",
+      "families": ["non-equi self join", "aggregate"],
+      "sql": "SELECT COUNT(*) AS ordered_region_pairs FROM region a JOIN region b ON a.r_regionkey < b.r_regionkey WHERE a.r_name <> b.r_name"
+    },
+    {
+      "id": "Q17",
+      "title": "Nation supplier ranking",
+      "families": ["window function", "join", "aggregate"],
+      "sql": "SELECT n.n_name, COUNT(s.s_suppkey) AS supplier_count, DENSE_RANK() OVER (ORDER BY COUNT(s.s_suppkey) DESC) AS supplier_rank FROM nation n LEFT JOIN supplier s ON s.s_nationkey = n.n_nationkey GROUP BY n.n_name ORDER BY supplier_rank, n.n_name"
+    },
+    {
+      "id": "Q18",
+      "title": "Line-item volume by return and status",
+      "families": ["aggregate", "grouping", "having"],
+      "sql": "SELECT l_returnflag, l_linestatus, SUM(l_quantity) AS quantity, AVG(l_discount) AS average_discount FROM lineitem WHERE l_shipdate >= DATE '1996-01-01' GROUP BY l_returnflag, l_linestatus HAVING SUM(l_quantity) > 10000 ORDER BY quantity DESC"
+    },
+    {
+      "id": "Q19",
+      "title": "Distinct market segments with suppliers",
+      "families": ["distinct", "four-way join", "filter"],
+      "sql": "SELECT DISTINCT c.c_mktsegment FROM customer c JOIN nation n ON n.n_nationkey = c.c_nationkey JOIN supplier s ON s.s_nationkey = n.n_nationkey JOIN partsupp ps ON ps.ps_suppkey = s.s_suppkey WHERE ps.ps_availqty > 500 AND c.c_acctbal < 0 ORDER BY c.c_mktsegment"
+    },
+    {
+      "id": "Q20",
+      "title": "Parts priced above their average",
+      "families": ["nested aggregate", "subquery", "filter"],
+      "sql": "SELECT p_partkey, p_name, p_retailprice FROM part WHERE p_retailprice > (SELECT AVG(p_retailprice) FROM part WHERE p_size = 10) ORDER BY p_retailprice DESC LIMIT 30"
+    },
+    {
+      "id": "Q21",
+      "title": "Orders from selected customers",
+      "families": ["IN subquery", "join", "filter"],
+      "sql": "SELECT o.o_orderkey, o.o_totalprice FROM orders o WHERE o.o_custkey IN (SELECT c.c_custkey FROM customer c JOIN nation n ON n.n_nationkey = c.c_nationkey WHERE n.n_name IN ('FRANCE', 'GERMANY', 'JAPAN')) ORDER BY o.o_totalprice DESC LIMIT 60"
+    },
+    {
+      "id": "Q22",
+      "title": "Supplier inventory valuation by part brand",
+      "families": ["three-way join", "aggregate", "filter"],
+      "sql": "SELECT p.p_brand, COUNT(*) AS supply_rows, SUM(ps.ps_availqty * ps.ps_supplycost) AS value FROM part p JOIN partsupp ps ON ps.ps_partkey = p.p_partkey JOIN supplier s ON s.s_suppkey = ps.ps_suppkey WHERE p.p_brand IN ('Brand#11', 'Brand#23') AND s.s_acctbal > 0 GROUP BY p.p_brand ORDER BY value DESC"
+    },
+    {
+      "id": "Q23",
+      "title": "Shipping delay by supplier nation",
+      "families": ["four-way join", "date filter", "aggregate"],
+      "sql": "SELECT n.n_name, AVG(l.l_receiptdate - l.l_shipdate) AS average_transit_days, COUNT(*) AS line_count FROM lineitem l JOIN supplier s ON s.s_suppkey = l.l_suppkey JOIN nation n ON n.n_nationkey = s.s_nationkey JOIN orders o ON o.o_orderkey = l.l_orderkey WHERE l.l_shipdate >= DATE '1995-01-01' AND l.l_receiptdate >= l.l_commitdate GROUP BY n.n_name ORDER BY average_transit_days DESC"
+    },
+    {
+      "id": "Q24",
+      "title": "Customers without qualifying orders",
+      "families": ["EXCEPT", "filter", "set operation"],
+      "sql": "(SELECT c_custkey FROM customer WHERE c_acctbal > 0 EXCEPT SELECT o_custkey FROM orders WHERE o_totalprice > 250000) ORDER BY c_custkey LIMIT 100"
+    },
+    {
+      "id": "Q25",
+      "title": "Line items matching alternative shipping filters",
+      "families": ["OR filter", "date range", "limit"],
+      "sql": "SELECT l_orderkey, l_partkey, l_shipdate FROM lineitem WHERE (l_shipmode = 'AIR' AND l_shipdate >= DATE '1996-01-01') OR (l_shipmode = 'SHIP' AND l_receiptdate < DATE '1995-06-01') ORDER BY l_shipdate LIMIT 75"
+    },
+    {
+      "id": "Q26",
+      "title": "Supplier count by part size",
+      "families": ["join", "distinct aggregate", "grouping"],
+      "sql": "SELECT p.p_size, COUNT(DISTINCT ps.ps_suppkey) AS supplier_count FROM part p JOIN partsupp ps ON ps.ps_partkey = p.p_partkey WHERE p.p_size BETWEEN 1 AND 12 GROUP BY p.p_size ORDER BY p.p_size"
+    },
+    {
+      "id": "Q27",
+      "title": "High-value customer order history",
+      "families": ["CTE", "three-way join", "aggregate", "sort"],
+      "sql": "WITH recent_orders AS (SELECT o_orderkey, o_custkey, o_orderdate, o_totalprice FROM orders WHERE o_orderdate >= DATE '1995-01-01') SELECT c.c_name, n.n_name, COUNT(ro.o_orderkey) AS order_count, MAX(ro.o_totalprice) AS largest_order FROM recent_orders ro JOIN customer c ON c.c_custkey = ro.o_custkey JOIN nation n ON n.n_nationkey = c.c_nationkey GROUP BY c.c_name, n.n_name HAVING COUNT(ro.o_orderkey) > 1 ORDER BY largest_order DESC LIMIT 50"
+    },
+    {
+      "id": "Q28",
+      "title": "Parts with limited supplier coverage",
+      "families": ["correlated scalar subquery", "filter", "sort"],
+      "sql": "SELECT p.p_partkey, p.p_name, (SELECT COUNT(*) FROM partsupp ps WHERE ps.ps_partkey = p.p_partkey) AS supplier_options FROM part p WHERE p.p_size >= 40 ORDER BY supplier_options, p.p_partkey LIMIT 100"
+    },
+    {
+      "id": "Q29",
+      "title": "Orders with several distinct shipping modes",
+      "families": ["join", "distinct aggregate", "having"],
+      "sql": "SELECT o.o_orderkey, COUNT(DISTINCT l.l_shipmode) AS shipping_modes FROM orders o JOIN lineitem l ON l.l_orderkey = o.o_orderkey WHERE o.o_orderdate >= DATE '1996-01-01' GROUP BY o.o_orderkey HAVING COUNT(DISTINCT l.l_shipmode) > 1 ORDER BY shipping_modes DESC, o.o_orderkey LIMIT 50"
+    },
+    {
+      "id": "Q30",
+      "title": "Supplier and customer nation pairs",
+      "families": ["four-way join", "aggregate", "grouping"],
+      "sql": "SELECT customer_nation.n_name AS customer_nation, supplier_nation.n_name AS supplier_nation, COUNT(*) AS shared_orders FROM orders o JOIN customer c ON c.c_custkey = o.o_custkey JOIN nation customer_nation ON customer_nation.n_nationkey = c.c_nationkey JOIN lineitem l ON l.l_orderkey = o.o_orderkey JOIN supplier s ON s.s_suppkey = l.l_suppkey JOIN nation supplier_nation ON supplier_nation.n_nationkey = s.s_nationkey WHERE o.o_orderdate >= DATE '1997-01-01' GROUP BY customer_nation.n_name, supplier_nation.n_name ORDER BY shared_orders DESC LIMIT 30"
+    }
+  ]
+}

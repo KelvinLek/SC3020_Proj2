@@ -9,6 +9,9 @@ venv/
 *.tbl
 *.csv
 tpch_data/
+experiment-results/api_budget.json
+experiment-results/.api_budget.lock
+experiment-results/*.tmp
 
 # Editor / tool files
 .vscode/

@@ -117,7 +117,7 @@ CONSTRAINTS = [
     "ALTER TABLE lineitem ADD CONSTRAINT lineitem_pkey PRIMARY KEY (l_orderkey, l_partkey, l_suppkey, l_linenumber)",
     "ALTER TABLE nation   ADD CONSTRAINT fk_nation   FOREIGN KEY (n_regionkey) REFERENCES region (r_regionkey)",
     "ALTER TABLE supplier ADD CONSTRAINT fk_supplier FOREIGN KEY (s_nationkey) REFERENCES nation (n_nationkey)",
-    "ALTER TABLE partsupp ADD CONSTRAINT fk_ps_partkey_partkey FOREIGN KEY (ps_partkey) REFERENCES part (p_partkey)",
+    "ALTER TABLE partsupp ADD CONSTRAINT fk_ps_suppkey_partkey FOREIGN KEY (ps_partkey) REFERENCES part (p_partkey)",
     "ALTER TABLE partsupp ADD CONSTRAINT fk_ps_suppkey_suppkey FOREIGN KEY (ps_suppkey) REFERENCES supplier (s_suppkey)",
     "ALTER TABLE customer ADD CONSTRAINT fk_customer FOREIGN KEY (c_nationkey) REFERENCES nation (n_nationkey)",
     "ALTER TABLE orders   ADD CONSTRAINT fk_orders   FOREIGN KEY (o_custkey) REFERENCES customer (c_custkey)",
