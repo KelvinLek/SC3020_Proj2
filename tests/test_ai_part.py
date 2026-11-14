@@ -33,6 +33,31 @@ def main():
 
         print("\nDatabase schema retrieved successfully.")
 
+        # # Same 13 queries as the PostgreSQL test
+        # from test_postgres_part import QUERIES
+        # import time
+
+        # for name, query in QUERIES.items():
+        #     print(f"\n========== {name} ==========")
+        #     try:
+        #         plan = pp.get_ai_plan(conn, query, schema_info=schema_info)
+        #     except pp.AIError as e:
+        #         print("AI error:", e)
+        #         continue
+
+        #     print("--- PostgreSQL (actual plan)")
+        #     print(pp.get_postgres_plan(conn, query, parallel=False).pretty())
+        #     print("--- AI (Gemini predicted plan)")
+        #     print(plan.pretty())
+
+        #     flags = [k for n in plan.walk() for k in n.details
+        #              if k in ("unknown_operator", "unknown_table", "unknown_index", "index_wrong_table")]
+        #     print("Flags:", flags or "none")
+        #     time.sleep(5)          # stay under the free-tier rate limit
+
+        # print("\nModel:", plan.details["ai_model"])
+        # print("\n========== TEST COMPLETED ==========")
+
         # Sample SQL query
         query = """
         SELECT c_name, o_orderdate
@@ -61,8 +86,15 @@ def main():
         print("--- AI (Gemini predicted plan)")
         print(plan.pretty())
 
+        print("\n--- Gemini raw JSON response")
+        raw = plan.details["ai_raw_response"]
+        try:
+            print(json.dumps(json.loads(raw), indent=2))   # neatly indented
+        except ValueError:
+            print(raw)                                     # print as-is if it isn't plain JSON
+
         print("\nModel:", plan.details["ai_model"])
-        print("Summary:", plan.details.get("ai_summary", "-"))
+        # print("Summary:", plan.details.get("ai_summary", "-"))
 
         print("\n========== TEST COMPLETED ==========")
 
