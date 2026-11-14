@@ -455,7 +455,7 @@ def main():
                        args.max_queries, scale_factor=args.scale_factor)
         return
 
-    if any((args.confirm_free_tier, args.query_ids, args.max_queries != MAX_EXPERIMENT_QUERIES,
+    if any((args.confirm_free_tier, args.query_ids, args.max_queries != MAX_DAILY_API_REQUESTS,
             args.scale_factor is not None,
             args.workload != Path(__file__).with_name('workload.json'),
             args.output_dir != Path(__file__).with_name('experiment-results'))):
